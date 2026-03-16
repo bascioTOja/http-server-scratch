@@ -5,6 +5,7 @@ use std::{env, thread};
 use std::fs::{read, File};
 use std::path::{Path, PathBuf};
 use flate2::Compression;
+use flate2::write::GzEncoder;
 
 fn get_buffer(mut stream: &TcpStream) -> Vec<u8> {
     let mut buffer = [0; 1024];
@@ -27,7 +28,7 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
     let mut host: String = String::new();
     let mut user_agent: String = String::new();
     let mut accept: String = String::new();
-    let mut accept_encoding: String = String::new();
+    let mut accept_encoding: Vec<String> = Vec::new();
     let mut content_type: String = String::new();
     let mut content_length: String = String::new();
 
@@ -39,7 +40,8 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
         } else if line.starts_with("Accept: ") {
             accept = line[8..].to_string();
         }  else if line.starts_with("Accept-Encoding: ") {
-            accept_encoding = line[17..].to_string();
+            let mut encodings = line[17..].to_string().split(",").map(|s| s.trim().to_string()).collect::<Vec<String>>();
+            accept_encoding.append(&mut encodings);
         } else if line.starts_with("Content-Type: ") {
             content_type = line[14..].to_string();
         } else if line.starts_with("Content-Length: ") {
@@ -151,7 +153,7 @@ struct Headers {
     host: String,
     user_agent: String,
     accept: String,
-    accept_encoding: String,
+    accept_encoding: Vec<String>,
     content_type: String,
     content_length: String,
 }
@@ -233,11 +235,13 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
 
     controller(&request, &mut response, Path::new(&directory));
 
-    if request.headers.accept_encoding == "gzip" {
+    if request.headers.accept_encoding.contains(&String::from("gzip")) {
         response.content_encoding = String::from("gzip");
-        response.body = flate2::write::GzEncoder::new(response.body, Compression::default()).finish().unwrap().to_vec();
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&response.body).unwrap();
+        response.body = encoder.finish().unwrap();
     }
 
-    stream.write(&response.build().as_bytes()).unwrap();
+    stream.write_all(response.build().as_bytes()).unwrap();
     stream.write_all(&response.body).unwrap();
 }
