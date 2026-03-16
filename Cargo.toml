@@ -1,0 +1,11 @@
+[package]
+name = "http-server-scratch"
+version = "0.1.0"
+authors = [""]
+edition = "2024"
+rust-version = "1.91"
+
+[dependencies]
+anyhow = "1.0.68"                                # error handling
+bytes = "1.3.0"                                  # helps manage buffers
+thiserror = "1.0.38"                             # error handling
