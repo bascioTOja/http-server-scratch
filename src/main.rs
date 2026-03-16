@@ -4,6 +4,7 @@ use std::net::TcpStream;
 use std::{env, thread};
 use std::fs::{read, File};
 use std::path::{Path, PathBuf};
+use flate2::Compression;
 
 fn get_buffer(mut stream: &TcpStream) -> Vec<u8> {
     let mut buffer = [0; 1024];
@@ -26,6 +27,7 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
     let mut host: String = String::new();
     let mut user_agent: String = String::new();
     let mut accept: String = String::new();
+    let mut accept_encoding: String = String::new();
     let mut content_type: String = String::new();
     let mut content_length: String = String::new();
 
@@ -36,6 +38,8 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
             user_agent = line[12..].to_string();
         } else if line.starts_with("Accept: ") {
             accept = line[8..].to_string();
+        }  else if line.starts_with("Accept-Encoding: ") {
+            accept_encoding = line[17..].to_string();
         } else if line.starts_with("Content-Type: ") {
             content_type = line[14..].to_string();
         } else if line.starts_with("Content-Length: ") {
@@ -49,6 +53,7 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
         host,
         user_agent,
         accept,
+        accept_encoding,
         content_type,
         content_length,
     }
@@ -146,6 +151,7 @@ struct Headers {
     host: String,
     user_agent: String,
     accept: String,
+    accept_encoding: String,
     content_type: String,
     content_length: String,
 }
@@ -160,12 +166,20 @@ struct Response {
     version: String,
     status: String,
     format: String,
+    content_encoding: String,
     body: Vec<u8>,
 }
 
 impl Response {
-    fn format(&self) -> String {
-        format!("{} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n", self.version, self.status, self.format, self.body.len())
+    fn build(&self) -> String {
+        let mut headers = format!("{} {}\r\nContent-Type: {}\r\n", self.version, self.status, self.format);
+
+        if self.content_encoding != "" {
+            headers.push_str(&format!("Content-Encoding: {}\r\n", self.content_encoding));
+        }
+        headers.push_str(&format!("Content-Length: {}\r\n\r\n", self.body.len()));
+
+        headers
     }
 }
 
@@ -213,11 +227,17 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
         version: String::from("HTTP/1.1"),
         status: String::new(),
         format: String::new(),
+        content_encoding: String::new(),
         body: Vec::new(),
     };
 
     controller(&request, &mut response, Path::new(&directory));
 
-    stream.write(&response.format().as_bytes()).unwrap();
+    if request.headers.accept_encoding == "gzip" {
+        response.content_encoding = String::from("gzip");
+        response.body = flate2::write::GzEncoder::new(response.body, Compression::default()).finish().unwrap().to_vec();
+    }
+
+    stream.write(&response.build().as_bytes()).unwrap();
     stream.write_all(&response.body).unwrap();
 }
