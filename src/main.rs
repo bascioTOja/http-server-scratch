@@ -24,9 +24,11 @@ fn get_request_headers(request_lines: &mut Split<&str>) -> Option<Headers> {
     let mut user_agent: String = String::new();
     let mut accept: String = String::new();
     let mut accept_encoding: Vec<String> = Vec::new();
+    let mut connection: String = String::new();
     let mut content_type: String = String::new();
     let mut content_length: usize = 0;
 
+    // TODO: case-insensitive
     for line in request_lines {
         if line.starts_with("Host: ") {
             host = line[6..].to_string();
@@ -37,6 +39,8 @@ fn get_request_headers(request_lines: &mut Split<&str>) -> Option<Headers> {
         }  else if line.starts_with("Accept-Encoding: ") {
             let mut encodings = line[17..].to_string().split(",").map(|s| s.trim().to_string()).collect::<Vec<String>>();
             accept_encoding.append(&mut encodings);
+        }  else if line.starts_with("Connection: ") {
+            connection = line[12..].to_string();
         } else if line.starts_with("Content-Type: ") {
             content_type = line[14..].to_string();
         } else if line.starts_with("Content-Length: ") {
@@ -51,6 +55,7 @@ fn get_request_headers(request_lines: &mut Split<&str>) -> Option<Headers> {
         user_agent,
         accept,
         accept_encoding,
+        connection,
         content_type,
         content_length,
     })
@@ -106,6 +111,7 @@ fn controller(request: &Request, response: &mut Response, files_path: &Path) {
     }
 
     if start.method == "GET" && (start.target == "/files" || start.target.starts_with("/files/")) {
+        // TODO: disallow absolut path and ../
         let file_path: PathBuf;
         if start.target == "/files" {
             file_path = files_path.join(&start.target[6..]).join("index.html");
@@ -153,6 +159,7 @@ struct Headers {
     user_agent: String,
     accept: String,
     accept_encoding: Vec<String>,
+    connection: String,
     content_type: String,
     content_length: usize,
 }
@@ -286,24 +293,29 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
             Err(error) => panic!("{}", error),
         };
 
-        println!("read {} bytes", buffer_size);
-        println!("buffer: {:?}", &buffer[..buffer_size]);
-
         conn_buffer = [conn_buffer, buffer[..buffer_size].to_vec()].concat();
 
-        println!("full buffer: {:?}", &conn_buffer);
-
         match try_build_request(&mut request, &mut conn_buffer) {
-            Ok(_) => handle_request(&request, &mut stream, &directory),
+            Ok(_) => {
+                match handle_request(&request, &mut stream, &directory) {
+                    Ok(_) => {
+                        request = Request {
+                            start: None,
+                            headers: None,
+                            body: None,
+                        };
+                    },
+                    Err(_) => break,
+                };
+            },
             Err(_) => {
-                println!("request not complete, waiting for more data");
                 continue;
             }
         };
     }
 }
 
-fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String) {
+fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String) -> Result<(), ()> {
     println!("-- HANDLE NEW REQUEST --");
     request.print_headers();
 
@@ -329,17 +341,29 @@ fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String)
         Ok(_) => (),
         Err(error) if error.kind() == ErrorKind::Interrupted => {
             println!("write to stream was interrupted.");
-            return;
+            return Err(());
         },
-        Err(error) => println!("failed to write to stream: {}", error),
+        Err(error) => {
+            println!("failed to write to stream: {}", error);
+            return Err(());
+        },
     }
 
     match stream.write_all(&response.body) {
         Ok(_) => (),
         Err(error) if error.kind() == ErrorKind::Interrupted => {
             println!("write to stream was interrupted.");
-            return;
+            return Err(());;
         },
-        Err(error) => println!("failed to write to stream: {}", error),
+        Err(error) => {
+            println!("failed to write to stream: {}", error);
+            return Err(());
+        },
     }
+
+    if headers.connection == "close" {
+        return Err(());
+    }
+
+    Ok(())
 }
