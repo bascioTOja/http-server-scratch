@@ -7,3 +7,4 @@ rust-version = "1.91"
 
 [dependencies]
 flate2 = "1.1.9"
+memchr = "2.8.0"

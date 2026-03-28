@@ -1,36 +1,31 @@
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::net::TcpStream;
 use std::{env, thread};
 use std::fs::{read, File};
 use std::path::{Path, PathBuf};
+use std::str::Split;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use memchr::memmem;
 
-fn get_buffer(mut stream: &TcpStream) -> Vec<u8> {
-    let mut buffer = [0; 1024];
-    let buffer_size = stream.read(&mut buffer).unwrap();
-
-    buffer[..buffer_size].to_vec()
-}
-
-fn get_request_start_line(request_line: &mut std::str::Split<&str>) -> StartLine {
+fn get_request_start_line(request_line: &mut Split<&str>) -> Option<StartLine> {
     let mut parts = request_line.next().unwrap_or("").split_whitespace();
 
-    StartLine {
+    Some(StartLine {
         method: parts.next().unwrap_or("").to_string(),
         target: parts.next().unwrap_or("").to_string(),
         version: parts.next().unwrap_or("").to_string(),
-    }
+    })
 }
 
-fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
+fn get_request_headers(request_lines: &mut Split<&str>) -> Option<Headers> {
     let mut host: String = String::new();
     let mut user_agent: String = String::new();
     let mut accept: String = String::new();
     let mut accept_encoding: Vec<String> = Vec::new();
     let mut content_type: String = String::new();
-    let mut content_length: String = String::new();
+    let mut content_length: usize = 0;
 
     for line in request_lines {
         if line.starts_with("Host: ") {
@@ -45,20 +40,20 @@ fn get_request_headers(request_lines: &mut std::str::Split<&str>) -> Headers {
         } else if line.starts_with("Content-Type: ") {
             content_type = line[14..].to_string();
         } else if line.starts_with("Content-Length: ") {
-            content_length = line[16..].to_string();
+            content_length = line[16..].parse::<usize>().unwrap_or(0);
         } else if line == "" {
             break;
         }
     }
 
-    Headers {
+    Some(Headers {
         host,
         user_agent,
         accept,
         accept_encoding,
         content_type,
         content_length,
-    }
+    })
 }
 
 fn get_file_response_format(path: &Path) -> String {
@@ -82,23 +77,27 @@ fn get_file_response_format(path: &Path) -> String {
 }
 
 fn controller(request: &Request, response: &mut Response, files_path: &Path) {
-    if request.start.target == "/" {
+    let start = request.start.as_ref().expect("request.start should be Some");
+    let headers = request.headers.as_ref().expect("request.headers should be Some");
+    let body = request.body.as_ref().expect("request.body should be Some");
+
+    if start.target == "/" {
         response.status = String::from("200 OK");
         response.format = String::from("text/plain");
 
         return;
     }
 
-    if request.start.target == "/user-agent" && request.start.method == "GET" {
+    if start.target == "/user-agent" && start.method == "GET" {
         response.status = String::from("200 OK");
         response.format = String::from("text/plain");
-        response.body = request.headers.user_agent.clone().to_string().as_bytes().to_vec();
+        response.body = headers.user_agent.clone().to_string().as_bytes().to_vec();
 
         return;
     }
 
-    if request.start.method == "GET" && request.start.target.starts_with("/echo/") {
-        let echo_message = &request.start.target[6..];
+    if start.method == "GET" && start.target.starts_with("/echo/") {
+        let echo_message = &start.target[6..];
         response.status = String::from("200 OK");
         response.format = String::from("text/plain");
         response.body = echo_message.to_string().as_bytes().to_vec();
@@ -106,12 +105,12 @@ fn controller(request: &Request, response: &mut Response, files_path: &Path) {
         return;
     }
 
-    if request.start.method == "GET" && (request.start.target == "/files" || request.start.target.starts_with("/files/")) {
+    if start.method == "GET" && (start.target == "/files" || start.target.starts_with("/files/")) {
         let file_path: PathBuf;
-        if request.start.target == "/files" {
-            file_path = files_path.join(&request.start.target[6..]).join("index.html");
+        if start.target == "/files" {
+            file_path = files_path.join(&start.target[6..]).join("index.html");
         } else {
-            file_path = files_path.join(&request.start.target[7..]);
+            file_path = files_path.join(&start.target[7..]);
         }
 
         println!("{}", file_path.display());
@@ -125,12 +124,12 @@ fn controller(request: &Request, response: &mut Response, files_path: &Path) {
         }
     }
 
-    if request.start.method == "POST" && request.headers.content_type == "application/octet-stream" && request.start.target.starts_with("/files/") {
-        let file_path = files_path.join(&request.start.target[7..]);
+    if start.method == "POST" && headers.content_type == "application/octet-stream" && start.target.starts_with("/files/") {
+        let file_path = files_path.join(&start.target[7..]);
         println!("{}", file_path.display());
 
-        let mut file = File::create(file_path).unwrap();
-        file.write_all(request.body.as_bytes()).unwrap();
+        let mut file = File::create(file_path);
+        file.unwrap().write_all(body);
 
         response.status = String::from("201 Created");
 
@@ -155,13 +154,29 @@ struct Headers {
     accept: String,
     accept_encoding: Vec<String>,
     content_type: String,
-    content_length: String,
+    content_length: usize,
 }
 
 struct Request {
-    start: StartLine,
-    headers: Headers,
-    body: String,
+    start: Option<StartLine>,
+    headers: Option<Headers>,
+    body: Option<Vec<u8>>,
+}
+
+impl Request {
+    fn print_headers(&self) {
+        if let Some(start) = &self.start {
+            println!("Start: {} {} {}", start.method, start.target, start.version);
+        } else {
+            println!("Start: <missing>");
+        }
+
+        if let Some(headers) = &self.headers {
+            println!("Headers: {} {} {} {} {}", headers.host, headers.user_agent, headers.accept, headers.content_type, headers.content_length);
+        } else {
+            println!("Headers: <missing>");
+        }
+    }
 }
 
 struct Response {
@@ -207,23 +222,90 @@ fn main() {
     }
 }
 
+fn try_build_request(request: &mut Request, buffer: &mut Vec<u8>) -> Result<(), ()> {
+    if request.start.is_none() && request.headers.is_none() {
+        let body_start = match memmem::find(buffer.as_slice(), b"\r\n\r\n") {
+            Some(pos) => pos + 4,
+            None => return Err(()),
+        };
+
+        let body_buffer = buffer.split_off(body_start);
+        let headers_buffer = std::mem::take(buffer);
+        *buffer = body_buffer;
+
+        let header_str = String::from_utf8_lossy(&headers_buffer);
+        let mut header_read: Split<&str> = header_str.split("\r\n");
+
+        request.start = get_request_start_line(&mut header_read);
+        request.headers = get_request_headers(&mut header_read);
+    }
+
+    if request.start.is_some() && request.headers.is_some() && request.body.is_none() {
+        let content_length = request.headers.as_ref().unwrap().content_length;
+
+        if buffer.len() < content_length {
+            return Err(());
+        }
+
+        let remaining = buffer.split_off(content_length);
+        let body_buffer = std::mem::replace(buffer, remaining);
+        request.body = Some(body_buffer);
+
+        return Ok(());
+    }
+
+    if request.start.is_some() && request.headers.is_some() && request.body.is_some() {
+        Ok(())
+    } else {
+        Err(())
+    }
+}
+
 fn handle_connection(mut stream: TcpStream, directory: String) {
+    println!("-- NEW CONNECTION --");
     println!("accepted new connection from {}", stream.peer_addr().unwrap());
 
-    let buffer = get_buffer(&stream);
-    let request_raw = String::from_utf8_lossy(buffer.as_slice());
-    println!("Request: {:?}", &request_raw);
-
-    let mut request_lines = request_raw.split("\r\n");
-
-    let request = Request {
-        start: get_request_start_line(&mut request_lines),
-        headers: get_request_headers(&mut request_lines),
-        body: request_raw[request_raw.find("\r\n\r\n").unwrap_or(request_raw.len()) + 4..].to_string(),
+    let mut conn_buffer: Vec<u8> = Vec::new();
+    let mut request = Request {
+        start: None,
+        headers: None,
+        body: None,
     };
 
-    println!("Start: {} {} {}", &request.start.method, &request.start.target, &request.start.version);
-    println!("Headers: {} {} {} {} {}", &request.headers.host, &request.headers.user_agent, &request.headers.accept, &request.headers.content_type, &request.headers.content_length);
+
+    println!("reading from stream");
+
+    loop {
+        let mut buffer: [u8; 1024] = [0; 1024];
+        let buffer_size = match stream.read(&mut buffer) {
+            Ok(size) => size,
+            Err(error) if error.kind() == ErrorKind::ConnectionAborted => {
+                println!("read from stream was closed.");
+                return;
+            },
+            Err(error) => panic!("{}", error),
+        };
+
+        println!("read {} bytes", buffer_size);
+        println!("buffer: {:?}", &buffer[..buffer_size]);
+
+        conn_buffer = [conn_buffer, buffer[..buffer_size].to_vec()].concat();
+
+        println!("full buffer: {:?}", &conn_buffer);
+
+        match try_build_request(&mut request, &mut conn_buffer) {
+            Ok(_) => handle_request(&request, &mut stream, &directory),
+            Err(_) => {
+                println!("request not complete, waiting for more data");
+                continue;
+            }
+        };
+    }
+}
+
+fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String) {
+    println!("-- HANDLE NEW REQUEST --");
+    request.print_headers();
 
     let mut response = Response {
         version: String::from("HTTP/1.1"),
@@ -235,13 +317,29 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
 
     controller(&request, &mut response, Path::new(&directory));
 
-    if request.headers.accept_encoding.contains(&String::from("gzip")) {
+    let headers = request.headers.as_ref().unwrap();
+    if headers.accept_encoding.contains(&String::from("gzip")) {
         response.content_encoding = String::from("gzip");
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&response.body).unwrap();
         response.body = encoder.finish().unwrap();
     }
 
-    stream.write_all(response.build().as_bytes()).unwrap();
-    stream.write_all(&response.body).unwrap();
+    match stream.write_all(response.build().as_bytes()) {
+        Ok(_) => (),
+        Err(error) if error.kind() == ErrorKind::Interrupted => {
+            println!("write to stream was interrupted.");
+            return;
+        },
+        Err(error) => println!("failed to write to stream: {}", error),
+    }
+
+    match stream.write_all(&response.body) {
+        Ok(_) => (),
+        Err(error) if error.kind() == ErrorKind::Interrupted => {
+            println!("write to stream was interrupted.");
+            return;
+        },
+        Err(error) => println!("failed to write to stream: {}", error),
+    }
 }
