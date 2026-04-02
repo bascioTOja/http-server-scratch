@@ -30,22 +30,23 @@ fn get_request_headers(request_lines: &mut Split<&str>) -> Option<Headers> {
 
     // TODO: case-insensitive
     for line in request_lines {
-        if line.starts_with("Host: ") {
+        let lowercase_line = line.to_lowercase();
+        if lowercase_line.starts_with("Host: ") {
             host = line[6..].to_string();
-        } else if line.starts_with("User-Agent: ") {
+        } else if lowercase_line.starts_with("User-Agent: ") {
             user_agent = line[12..].to_string();
-        } else if line.starts_with("Accept: ") {
+        } else if lowercase_line.starts_with("Accept: ") {
             accept = line[8..].to_string();
-        }  else if line.starts_with("Accept-Encoding: ") {
+        }  else if lowercase_line.starts_with("Accept-Encoding: ") {
             let mut encodings = line[17..].to_string().split(",").map(|s| s.trim().to_string()).collect::<Vec<String>>();
             accept_encoding.append(&mut encodings);
-        }  else if line.starts_with("Connection: ") {
+        }  else if lowercase_line.starts_with("Connection: ") {
             connection = line[12..].to_string();
-        } else if line.starts_with("Content-Type: ") {
+        } else if lowercase_line.starts_with("Content-Type: ") {
             content_type = line[14..].to_string();
-        } else if line.starts_with("Content-Length: ") {
+        } else if lowercase_line.starts_with("Content-Length: ") {
             content_length = line[16..].parse::<usize>().unwrap_or(0);
-        } else if line == "" {
+        } else if lowercase_line == "" {
             break;
         }
     }
@@ -96,7 +97,7 @@ fn controller(request: &Request, response: &mut Response, files_path: &Path) {
     if start.target == "/user-agent" && start.method == "GET" {
         response.status = String::from("200 OK");
         response.format = String::from("text/plain");
-        response.body = headers.user_agent.clone().to_string().as_bytes().to_vec();
+        response.body = headers.user_agent.as_bytes().to_vec();
 
         return;
     }
@@ -134,8 +135,8 @@ fn controller(request: &Request, response: &mut Response, files_path: &Path) {
         let file_path = files_path.join(&start.target[7..]);
         println!("{}", file_path.display());
 
-        let mut file = File::create(file_path);
-        file.unwrap().write_all(body);
+        let file = File::create(file_path);
+        file.unwrap().write_all(body).expect("Error writing file");
 
         response.status = String::from("201 Created");
 
@@ -199,11 +200,11 @@ impl Response {
     fn build(&self) -> String {
         let mut headers = format!("{} {}\r\nContent-Type: {}\r\n", self.version, self.status, self.format);
 
-        if self.content_encoding != "" {
+        if !self.content_encoding.is_empty() {
             headers.push_str(&format!("Content-Encoding: {}\r\n", self.content_encoding));
         }
 
-        if self.connection != "" {
+        if !self.connection.is_empty() {
             headers.push_str(&format!("Connection: {}\r\n", self.connection));
         }
 
@@ -285,7 +286,6 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
         body: None,
     };
 
-
     println!("reading from stream");
 
     loop {
@@ -299,7 +299,7 @@ fn handle_connection(mut stream: TcpStream, directory: String) {
             Err(error) => panic!("{}", error),
         };
 
-        conn_buffer = [conn_buffer, buffer[..buffer_size].to_vec()].concat();
+        conn_buffer.extend_from_slice(&buffer[..buffer_size]);
 
         match try_build_request(&mut request, &mut conn_buffer) {
             Ok(_) => {
@@ -364,7 +364,7 @@ fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String)
         Ok(_) => (),
         Err(error) if error.kind() == ErrorKind::Interrupted => {
             println!("write to stream was interrupted.");
-            return Err(());;
+            return Err(());
         },
         Err(error) => {
             println!("failed to write to stream: {}", error);
