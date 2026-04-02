@@ -191,6 +191,7 @@ struct Response {
     status: String,
     format: String,
     content_encoding: String,
+    connection: String,
     body: Vec<u8>,
 }
 
@@ -201,6 +202,11 @@ impl Response {
         if self.content_encoding != "" {
             headers.push_str(&format!("Content-Encoding: {}\r\n", self.content_encoding));
         }
+
+        if self.connection != "" {
+            headers.push_str(&format!("Connection: {}\r\n", self.connection));
+        }
+
         headers.push_str(&format!("Content-Length: {}\r\n\r\n", self.body.len()));
 
         headers
@@ -323,6 +329,7 @@ fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String)
         version: String::from("HTTP/1.1"),
         status: String::new(),
         format: String::new(),
+        connection: String::new(),
         content_encoding: String::new(),
         body: Vec::new(),
     };
@@ -335,6 +342,10 @@ fn handle_request(request: &Request, stream: &mut TcpStream, directory: &String)
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&response.body).unwrap();
         response.body = encoder.finish().unwrap();
+    }
+
+    if headers.connection == "close" {
+        response.connection = String::from("close");
     }
 
     match stream.write_all(response.build().as_bytes()) {
